@@ -1,13 +1,33 @@
-import { NavLink, useLocation } from "react-router-dom";
+import { useEffect, useState, type PropsWithChildren } from "react";
+import { NavLink } from "react-router-dom";
+import { api } from "../api";
 import { useTheme } from "../theme";
-import type { PropsWithChildren } from "react";
 
 export function AppShell({ children }: PropsWithChildren) {
   const { mode, toggleTheme } = useTheme();
-  const location = useLocation();
-  const provider = import.meta.env.VITE_LLM_PROVIDER ?? "OpenRouter";
-  const model = import.meta.env.VITE_LLM_MODEL ?? "openrouter/hunter-alpha";
-  const routeLabel = location.pathname === "/" ? "/courses" : location.pathname;
+  const [runtimeConfig, setRuntimeConfig] = useState({
+    provider: "OpenRouter",
+    model: "openrouter/hunter-alpha",
+  });
+
+  useEffect(() => {
+    let isMounted = true;
+
+    void api
+      .getRuntimeConfig()
+      .then((config) => {
+        if (isMounted) {
+          setRuntimeConfig(config);
+        }
+      })
+      .catch(() => {
+        // Keep fallback labels if the config endpoint is unavailable.
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   return (
     <div className="app-shell">
@@ -17,7 +37,7 @@ export function AppShell({ children }: PropsWithChildren) {
             Logos
           </NavLink>
           <span className="brand-tag">
-            API: {provider} &middot; Model: {model}
+            {runtimeConfig.provider} &middot; {runtimeConfig.model}
           </span>
         </div>
 
@@ -26,16 +46,16 @@ export function AppShell({ children }: PropsWithChildren) {
             to="/courses"
             className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}
           >
-            Existing Courses
+            Library
           </NavLink>
           <NavLink
             to="/courses/generate"
             className={({ isActive }) => (isActive ? "nav-link active" : "nav-link")}
           >
-            Generate Course
+            Generate
           </NavLink>
           <button type="button" className="theme-toggle" onClick={toggleTheme}>
-            {mode === "dark" ? "Light theme" : "Dark theme"}
+            {mode === "dark" ? "☀ Light" : "☾ Dark"}
           </button>
         </nav>
       </header>

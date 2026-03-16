@@ -24,6 +24,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  getRuntimeConfig: () =>
+    request<{ provider: string; model: string }>("/api/runtime-config"),
   listCourses: () => request<CourseSummary[]>("/api/courses"),
   getCourse: (courseId: number) => request<CourseDetail>(`/api/courses/${courseId}`),
   generateCourse: (body: GenerateCourseRequest) =>

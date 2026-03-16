@@ -28,6 +28,39 @@ app.add_middleware(
 )
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+DEFAULT_MODEL = "openrouter/hunter-alpha"
+
+# System prompt injected for all chapter content generation requests.
+# Leading, explicit, and repeated — LLMs follow front-loaded instructions.
+CHAPTER_SYSTEM_PROMPT = """\
+You are a senior technical course author writing structured lesson content in Markdown.
+
+CODE FORMATTING — NON-NEGOTIABLE RULES:
+1. EVERY code snippet, no matter how short, MUST be inside a fenced code block.
+2. The opening fence MUST include a language tag on the SAME line: ```go  ```python  ```typescript  ```bash  ```yaml  ```sql  ```json  ```rust  ```dockerfile
+3. Never write bare code in prose. If a paragraph would contain a function call, import statement, variable declaration, shell command, or config key-value — it belongs in a fenced block.
+4. Inline backticks (` `) are ONLY for referencing names/terms (e.g. `http.Handler`, `os.Getenv`), NOT for code that spans multiple tokens or forms a statement.
+5. Each fenced block must stand alone: one blank line before the opening fence, one blank line after the closing fence.
+
+EXAMPLE of correct formatting:
+The server is started using the `ListenAndServe` function.
+
+```go
+package main
+
+import (
+    "fmt"
+    "net/http"
+)
+
+func main() {
+    http.HandleFunc("/", handler)
+    fmt.Println(http.ListenAndServe(":8080", nil))
+}
+```
+
+The handler receives a `ResponseWriter` and `*Request`.
+"""
 
 
 # ── OpenRouter helper ──────────────────────────────────────────────────────────────
@@ -38,7 +71,7 @@ async def call_openrouter(api_key: str, prompt: str, system: str = "") -> str:
     if not key_to_use:
         raise HTTPException(status_code=400, detail="OpenRouter API key is missing. Please provide it or set it in .env")
     
-    model = os.getenv("OPENROUTER_MODEL", "openrouter/hunter-alpha")
+    model = os.getenv("OPENROUTER_MODEL", DEFAULT_MODEL)
     
     body = {
         "model": model,
@@ -80,17 +113,43 @@ def parse_json_response(raw: str) -> dict:
 
 def infer_code_language(code: str) -> str:
     trimmed = code.strip()
+    # Go
     if re.search(r"(^|\n)\s*(package\s+\w+|import\s*\(|func\s+\w+\s*\(|type\s+\w+\s+struct)", trimmed):
         return "go"
-    if re.search(r"(^|\n)\s*(def\s+\w+\(|from\s+\w+\s+import\s+|import\s+\w+)", trimmed):
+    if re.search(r"\bfmt\.\w+\(|\bhttp\.HandlerFunc\b|\bdefer\b|\berrorf?\b", trimmed):
+        return "go"
+    # Python
+    if re.search(r"(^|\n)\s*(def\s+\w+\(|class\s+\w+[:(]|from\s+\w+\s+import\s+|import\s+\w+)", trimmed):
         return "python"
-    if re.search(r"(^|\n)\s*(const|let|function)\s+\w+|=>|console\.log\(", trimmed):
-        return "javascript"
-    if re.search(r"(^|\n)\s*(interface|type|export\s+|import\s+.+from\s+)", trimmed):
+    if re.search(r"(^|\n)\s*(if\s+__name__\s*==|@\w+|print\s*\(|self\.\w+)", trimmed):
+        return "python"
+    # TypeScript (before JS – TS patterns are more specific)
+    if re.search(r"(^|\n)\s*(interface\s+\w+|type\s+\w+\s*=|export\s+(default\s+)?|import\s+.+from\s+)", trimmed):
         return "typescript"
-    if re.search(r"^\s*(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER)\b", trimmed, re.IGNORECASE):
+    if re.search(r":\s*(string|number|boolean|void|any|unknown|never)\b", trimmed):
+        return "typescript"
+    # JavaScript
+    if re.search(r"(^|\n)\s*(const|let|function)\s+\w+|=>\s*[{(]|console\.(log|error)\(", trimmed):
+        return "javascript"
+    # Rust
+    if re.search(r"(^|\n)\s*(fn\s+\w+|use\s+\w+::|impl\s+\w+|let\s+mut\s+|pub\s+(fn|struct|enum|mod))", trimmed):
+        return "rust"
+    # Bash / Shell
+    if re.search(r"(^|\n)\s*(#!.*(bash|sh|zsh)|export\s+\w+=|echo\s+|sudo\s+|\$\(|\bchmod\b|\bapt(-get)?\b|\byum\b)", trimmed):
+        return "bash"
+    if re.search(r"(^|\n)\s*\$\s+\S", trimmed):  # $ prompt lines
+        return "bash"
+    # YAML
+    if re.search(r"(^|\n)(\w[\w-]*:\s+\S|---\s*$)", trimmed) and not re.search(r"[{};()]", trimmed):
+        return "yaml"
+    # Dockerfile
+    if re.search(r"(^|\n)\s*(FROM|RUN|CMD|EXPOSE|ENV|COPY|ADD|ENTRYPOINT|WORKDIR)\s", trimmed):
+        return "dockerfile"
+    # SQL
+    if re.search(r"^\s*(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|WITH)\b", trimmed, re.IGNORECASE):
         return "sql"
-    if re.search(r"^\s*[\[{]", trimmed):
+    # JSON
+    if re.search(r"^\s*[{[]", trimmed) and re.search(r"[}\]]\s*$", trimmed):
         return "json"
     return "text"
 
@@ -99,14 +158,23 @@ def looks_like_code_line(line: str) -> bool:
     trimmed = line.strip()
     if not trimmed:
         return False
-    if re.match(r"^(#{1,6}\s|[-*]\s|>\s)", trimmed):
+    # Markdown structural elements are not code
+    if re.match(r"^(#{1,6}\s|[-*]\s|>\s|\d+\.\s)", trimmed):
+        return False
+    # Plain prose sentences (end in period, question mark, or are short natural language)
+    if re.match(r"^[A-Z][a-z].*[.?!]$", trimmed) and len(trimmed) > 40:
         return False
     return bool(
         re.search(r"[{}();]", trimmed)
-        or re.search(r"\b(func|package|import|return|if|else|for|switch|case|const|let|var|type|struct|class)\b", trimmed)
-        or re.search(r"\w+\s*:=\s*", trimmed)
-        or re.search(r"\w+\.\w+\(", trimmed)
-        or re.search(r"//", trimmed)
+        or re.search(r"\b(func|package|import|return|if|else|for|switch|case|const|let|var|type|struct|class|def|fn|pub|use|impl|mod)\b", trimmed)
+        or re.search(r"\w+\s*:=\s*", trimmed)                    # Go short assign
+        or re.search(r"\w+\.\w+\(", trimmed)                     # method call
+        or re.search(r"//|#\s+\w", trimmed)                      # line comments
+        or re.search(r"^\s*\$\s+\S", trimmed)                    # shell prompt
+        or re.search(r"^\s*-{2,}\w", trimmed)                    # CLI flags --flag
+        or re.search(r"^\s*[A-Z_]{2,}=", trimmed)               # ENV=value
+        or re.search(r"(FROM|RUN|CMD|COPY|EXPOSE|ENV)\s+\S", trimmed)  # Dockerfile
+        or re.search(r"^\s*(SELECT|INSERT|UPDATE|DELETE|CREATE)\s", trimmed, re.IGNORECASE)
     )
 
 
@@ -115,12 +183,23 @@ def normalize_markdown_content(content: str | None) -> str | None:
         return content
 
     def normalize_existing_fence(match: re.Match) -> str:
-        lang = match.group(1) or ""
+        lang = (match.group(1) or "").strip()
         code = match.group(2).strip()
         next_lang = lang if lang and lang != "text" else infer_code_language(code)
         return f"```{next_lang}\n{code}\n```"
 
-    normalized = re.sub(r"```(\w+)?\n([\s\S]*?)```", normalize_existing_fence, content)
+    # Normalize existing fences: handle optional newline/spaces after language tag,
+    # and fences that may have no language tag at all.
+    normalized = re.sub(
+        r"```(\w+)?[ \t]*\n?([\s\S]*?)```",
+        normalize_existing_fence,
+        content,
+    )
+
+    # Close any unclosed fence that the LLM left open (e.g. trailing ```)
+    open_fences = normalized.count("```")
+    if open_fences % 2 != 0:
+        normalized = normalized.rstrip() + "\n```"
 
     lines = normalized.split("\n")
     output: list[str] = []
@@ -138,7 +217,9 @@ def normalize_markdown_content(content: str | None) -> str | None:
         buffer = []
 
     for line in lines:
-        if line.strip().startswith("```"):
+        trimmed = line.strip()
+
+        if trimmed.startswith("```"):
             flush_buffer()
             in_fence = not in_fence
             output.append(line)
@@ -146,8 +227,16 @@ def normalize_markdown_content(content: str | None) -> str | None:
         if in_fence:
             output.append(line)
             continue
-        if looks_like_code_line(line) or (buffer and (line.startswith("    ") or line.startswith("\t") or not line.strip())):
+        if looks_like_code_line(line) or (buffer and (line.startswith("    ") or line.startswith("\t") or not trimmed)):
             buffer.append(line)
+            continue
+        if (
+            re.match(r"^( {2,}|\t+)", line)
+            and not looks_like_code_line(line)
+            and not re.match(r"^(#{1,6}\s|[-*]\s|>\s|\d+\.\s)", trimmed)
+        ):
+            flush_buffer()
+            output.append(trimmed)
             continue
         flush_buffer()
         output.append(line)
@@ -175,6 +264,13 @@ def chapter_to_schema(ch: models.Chapter) -> schemas.ChapterSummary:
 
 
 # ── Course routes ──────────────────────────────────────────────────────────────
+
+@app.get("/api/runtime-config", response_model=schemas.RuntimeConfig)
+def get_runtime_config():
+    return schemas.RuntimeConfig(
+        provider="OpenRouter",
+        model=os.getenv("OPENROUTER_MODEL", DEFAULT_MODEL),
+    )
 
 @app.get("/api/courses", response_model=list[schemas.CourseSummary])
 def list_courses(db: Session = Depends(get_db)):
@@ -361,53 +457,40 @@ async def generate_chapter(
         for item in sibling_chapters
     ]
 
-    prompt = f"""Generate the FULL lesson content for one chapter in a course.
+    prompt = f"""Generate FULL lesson content for this chapter. Return ONLY valid JSON — no text outside the JSON object.
 
-Course title: "{course.title}"
-Course topic: "{course.topic}"
-Course level: "{course.level}"
-Course description: "{course.description}"
+Course: "{course.title}" ({course.level} level)
+Section {section.number}: "{section.title}"
+Chapter {chapter.number}: "{chapter.title}"
+Description: "{chapter.description}"
+Key concepts: {json.dumps(chapter.key_concepts)}
+Include diagram: {"yes" if chapter.has_diagram else "no"}
 
-Current section:
-- number: {section.number}
-- title: "{section.title}"
-- description: "{section.description}"
-
-Chapter outline:
-- number: {chapter.number}
-- title: "{chapter.title}"
-- description: "{chapter.description}"
-- key concepts: {json.dumps(chapter.key_concepts)}
-- has diagram: {"true" if chapter.has_diagram else "false"}
-
-Sibling chapter outline for context:
+Sibling chapters (for context, do NOT repeat their content):
 {json.dumps(sibling_outline, indent=2)}
 
-Return ONLY valid JSON, no markdown outside of the JSON string:
+Return this exact JSON shape:
 {{
-  "keyConcepts": ["concept1", "concept2", "concept3"],
+  "keyConcepts": ["...", "..."],
   "hasDiagram": true,
   "content": {{
-    "explanation": "3-4 paragraphs with markdown: **bold**, `code`, ### headings, bullet lists, ```language code blocks. Be technical and deep.",
-    "diagram": "valid Mermaid diagram string or null",
-    "realWorldExample": "Concrete scenario with actual code snippets.",
+    "explanation": "<3-4 paragraphs of deep technical prose with ### subheadings, **bold** emphasis, bullet lists, and ALL code in ```language fenced blocks>",
+    "diagram": "<Mermaid diagram string, or null if hasDiagram is false>",
+    "realWorldExample": "<A concrete, worked scenario. ALL code MUST be in ```language fenced blocks>",
     "exercises": [
       {{"title": "...", "description": "..."}}
     ],
-    "summary": "2-3 sentence summary."
+    "summary": "<2-3 sentence recap>"
   }}
 }}
 
-Rules:
-- Stay tightly scoped to this chapter only.
-- Keep the chapter aligned with the course level and section context.
-- If hasDiagram is false, set diagram to null.
-- CRITICAL: Any code snippets MUST be properly wrapped in markdown triple backticks with a language label, for example ```go.
-- CRITICAL: Never place code outside a fenced code block. Do not write code-like lines in normal paragraphs.
-- CRITICAL: Start the code fence before the first code token such as `package`, `import`, `func`, or variable declarations.
+Constraints:
+- Scope to THIS chapter only. Do not repeat sibling chapter material.
+- Match depth and vocabulary to {course.level} level.
+- explanation and realWorldExample MUST use ```language fenced blocks for every code snippet — no bare code in prose.
 - Return pure JSON only."""
 
-    raw = await call_openrouter(req.api_key, prompt)
+    raw = await call_openrouter(req.api_key, prompt, system=CHAPTER_SYSTEM_PROMPT)
     data = parse_json_response(raw)
     content = data.get("content", {})
 

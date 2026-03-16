@@ -93,19 +93,12 @@ export function CourseViewPage() {
 
   const chapters = useMemo(() => (course ? flattenCourse(course) : []), [course]);
   const active = chapters[activeIndex];
-  const progress = course
-    ? clampPercent(
-        chapters.filter((item) => item.chapter.completed).length,
-        Math.max(chapters.length, 1),
-      )
-    : 0;
+  const completedCount = chapters.filter((item) => item.chapter.completed).length;
+  const progress = course ? clampPercent(completedCount, Math.max(chapters.length, 1)) : 0;
 
   function mergeChapter(nextChapter: ChapterSummary) {
     setCourse((current) => {
-      if (!current) {
-        return current;
-      }
-
+      if (!current) return current;
       return {
         ...current,
         sections: current.sections.map((section) => ({
@@ -119,9 +112,7 @@ export function CourseViewPage() {
   }
 
   async function ensureChapterGenerated(chapter: ChapterSummary, force = false) {
-    if ((!force && chapter.generated) || generatingChapterId === chapter.id) {
-      return;
-    }
+    if ((!force && chapter.generated) || generatingChapterId === chapter.id) return;
 
     try {
       setError("");
@@ -151,9 +142,7 @@ export function CourseViewPage() {
   }, [active?.chapter?.id]);
 
   async function handleMarkComplete() {
-    if (!course || !active) {
-      return;
-    }
+    if (!course || !active) return;
 
     try {
       await api.markChapterComplete(active.chapter.id);
@@ -167,36 +156,47 @@ export function CourseViewPage() {
     }
   }
 
-  if (isLoading) {
-    return <LoadingState label="Loading course..." />;
-  }
+  if (isLoading) return <LoadingState label="Loading course..." />;
+  if (error) return <ErrorState message={error} />;
+  if (!course || !active) return <ErrorState message="This course does not have any chapters yet." />;
 
-  if (error) {
-    return <ErrorState message={error} />;
-  }
-
-  if (!course || !active) {
-    return <ErrorState message="This course does not have any chapters yet." />;
-  }
+  const isGenerating = generatingChapterId === active.chapter.id;
 
   return (
     <section className="course-layout">
+      {/* ── Sidebar ─────────────────────────────────────────── */}
       <aside className="sidebar-card">
         <div className="sidebar-header">
-          <span className="eyebrow">Course View</span>
+          <span className="eyebrow">Course</span>
           <h1>{course.title}</h1>
           <p>{course.description}</p>
+
           <div className="sidebar-meta">
             <span className="level-pill">{course.level}</span>
             <span>{formatDate(course.created_at)}</span>
-            <span>{progress}% complete</span>
           </div>
-          <div className="card-actions" style={{ marginTop: "0.5rem" }}>
+
+          <div className="sidebar-progress">
+            <div className="sidebar-progress-label">
+              <span>Progress</span>
+              <span>
+                {completedCount} / {chapters.length} chapters
+              </span>
+            </div>
+            <div className="progress-bar">
+              <div
+                className={`progress-fill${progress === 100 ? " complete" : ""}`}
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+          </div>
+
+          <div className="sidebar-actions">
             <Link className="secondary-button" to="/courses">
-              Back to courses
+              ← Back
             </Link>
-            <Link 
-              className="primary-button" 
+            <Link
+              className="primary-button"
               to={`/courses/generate?topic=${encodeURIComponent(course.topic)}&level=${course.level}&sections=${course.sections.length}&chapters=${course.sections[0]?.chapters.length || 8}`}
             >
               Regenerate
@@ -217,15 +217,16 @@ export function CourseViewPage() {
                   <h2>
                     {section.number}. {section.title}
                   </h2>
-                  <span className="collapse-icon">{isCollapsed ? "▼" : "▲"}</span>
+                  <span className="collapse-icon">{isCollapsed ? "▶" : "▼"}</span>
                 </button>
+
                 {!isCollapsed && (
                   <div className="chapter-nav-list">
                     {section.chapters.map((chapter) => {
-                      const chapterIndex = chapters.findIndex((item) => item.chapter.id === chapter.id);
-                      if (chapterIndex < 0) {
-                        return null;
-                      }
+                      const chapterIndex = chapters.findIndex(
+                        (item) => item.chapter.id === chapter.id,
+                      );
+                      if (chapterIndex < 0) return null;
                       const isActive = chapterIndex === activeIndex;
                       return (
                         <button
@@ -234,10 +235,13 @@ export function CourseViewPage() {
                           className={isActive ? "chapter-nav active" : "chapter-nav"}
                           onClick={() => void handleSelectChapter(chapterIndex)}
                         >
-                          <span>{chapter.number}</span>
-                          <strong>{chapter.title}</strong>
-                          {!chapter.generated ? <small>Generate on open</small> : null}
-                          {chapter.completed ? <em>Done</em> : null}
+                          <span className="chapter-nav-num">{chapter.number}</span>
+                          <span className="chapter-nav-title">{chapter.title}</span>
+                          {chapter.completed ? (
+                            <span className="chapter-nav-status">✓</span>
+                          ) : (
+                            <span />
+                          )}
                         </button>
                       );
                     })}
@@ -249,17 +253,19 @@ export function CourseViewPage() {
         </div>
       </aside>
 
+      {/* ── Content ─────────────────────────────────────────── */}
       <article className="content-card">
         <div className="content-header">
           <span className="eyebrow">
-            Chapter {activeIndex + 1} of {chapters.length}
+            {active.section.title} &middot; Chapter {activeIndex + 1} of {chapters.length}
           </span>
           <h2>{active.chapter.title}</h2>
-          <p>{active.chapter.description}</p>
+          <p className="content-description">{active.chapter.description}</p>
         </div>
 
+        {/* Key Concepts */}
         <section className="content-section">
-          <h3>Key concepts</h3>
+          <h3 className="section-heading">Key concepts</h3>
           <div className="concept-row">
             {active.chapter.key_concepts.map((concept) => (
               <span className="concept-pill" key={concept}>
@@ -269,15 +275,16 @@ export function CourseViewPage() {
           </div>
         </section>
 
+        {/* Explanation */}
         <section className="content-section">
-          <h3>Explanation</h3>
-          {generatingChapterId === active.chapter.id ? (
+          <h3 className="section-heading">Explanation</h3>
+          {isGenerating ? (
             <LoadingState label="Generating chapter content..." />
           ) : active.chapter.generated ? (
             <MarkdownBlock content={active.chapter.explanation} />
           ) : (
             <div className="empty-inline-state">
-              <p>This chapter only has its outline so far. Open it to generate the full lesson.</p>
+              <p>This chapter only has its outline so far.</p>
               <button
                 type="button"
                 className="primary-button"
@@ -289,15 +296,17 @@ export function CourseViewPage() {
           )}
         </section>
 
+        {/* Diagram */}
         {active.chapter.generated && active.chapter.diagram ? (
           <section className="content-section">
-            <h3>Diagram</h3>
+            <h3 className="section-heading">Diagram</h3>
             <MermaidDiagram chart={sanitizeMermaid(active.chapter.diagram)} theme={mode} />
           </section>
         ) : null}
 
+        {/* Real-world example */}
         <section className="content-section">
-          <h3>Real world example</h3>
+          <h3 className="section-heading">Real-world example</h3>
           {active.chapter.generated ? (
             <MarkdownBlock content={active.chapter.real_world_example} />
           ) : (
@@ -305,8 +314,9 @@ export function CourseViewPage() {
           )}
         </section>
 
+        {/* Exercises */}
         <section className="content-section">
-          <h3>Exercises</h3>
+          <h3 className="section-heading">Exercises</h3>
           {active.chapter.generated && active.chapter.exercises.length ? (
             <div className="exercise-list">
               {active.chapter.exercises.map((exercise) => (
@@ -323,40 +333,45 @@ export function CourseViewPage() {
           )}
         </section>
 
+        {/* Summary */}
         <section className="content-section">
-          <h3>Summary</h3>
+          <h3 className="section-heading">Summary</h3>
           <p className="summary-text">
             {active.chapter.generated
-              ? active.chapter.summary ?? "No summary available."
+              ? (active.chapter.summary ?? "No summary available.")
               : "Generate the chapter to load the summary."}
           </p>
         </section>
 
+        {/* Actions */}
         <div className="content-actions">
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={() => void ensureChapterGenerated(active.chapter, true)}
-            disabled={generatingChapterId === active.chapter.id}
-          >
-            {generatingChapterId === active.chapter.id ? "Regenerating..." : "Regenerate chapter"}
-          </button>
           <button
             type="button"
             className="secondary-button"
-            onClick={() => void handleSelectChapter(Math.max(activeIndex - 1, 0))}
-            disabled={activeIndex === 0}
+            onClick={() => void ensureChapterGenerated(active.chapter, true)}
+            disabled={isGenerating}
           >
-            Previous chapter
+            {isGenerating ? "Regenerating..." : "Regenerate"}
           </button>
-          <button
-            type="button"
-            className="primary-button"
-            onClick={() => void handleMarkComplete()}
-            disabled={!active.chapter.generated || generatingChapterId === active.chapter.id}
-          >
-            {activeIndex === chapters.length - 1 ? "Complete course" : "Mark done and continue"}
-          </button>
+
+          <div className="content-actions-right">
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => void handleSelectChapter(Math.max(activeIndex - 1, 0))}
+              disabled={activeIndex === 0}
+            >
+              ← Previous
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => void handleMarkComplete()}
+              disabled={!active.chapter.generated || isGenerating}
+            >
+              {activeIndex === chapters.length - 1 ? "Complete course" : "Mark done & continue →"}
+            </button>
+          </div>
         </div>
       </article>
     </section>

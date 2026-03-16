@@ -29,10 +29,7 @@ export function CourseLibraryPage() {
 
   async function handleDelete(courseId: number) {
     const confirmed = window.confirm("Delete this course and all of its chapters?");
-    if (!confirmed) {
-      return;
-    }
-
+    if (!confirmed) return;
     await api.deleteCourse(courseId);
     await loadCourses();
   }
@@ -40,12 +37,9 @@ export function CourseLibraryPage() {
   return (
     <section className="page-grid">
       <div className="hero-card">
-        <span className="eyebrow">Course Library</span>
-        <h1>Existing courses stay local and ready to reopen.</h1>
-        <p>
-          Browse generated material, resume where you stopped, or branch into a new topic
-          from the generator route.
-        </p>
+        <span className="eyebrow">Library</span>
+        <h1>Your courses</h1>
+        <p>Resume where you left off, or branch into a new topic.</p>
         <div className="hero-actions">
           <Link className="primary-button" to="/courses/generate">
             Generate a course
@@ -54,14 +48,14 @@ export function CourseLibraryPage() {
       </div>
 
       {isLoading ? (
-        <LoadingState label="Loading existing courses..." />
+        <LoadingState label="Loading courses..." />
       ) : error ? (
         <ErrorState message={error} />
       ) : courses.length === 0 ? (
         <div className="empty-card">
-          <p>No courses exist yet.</p>
+          <p>No courses yet. Generate one to get started.</p>
           <Link className="secondary-button" to="/courses/generate">
-            Create the first course
+            Create your first course
           </Link>
         </div>
       ) : (
@@ -84,29 +78,36 @@ export function CourseLibraryPage() {
                 </div>
 
                 <div className="course-card-side">
-                  <div className="progress-badge">{percent}% complete</div>
+                  <div className="progress-badge">{percent}%</div>
+                  <div className="progress-bar">
+                    <div
+                      className={`progress-fill${percent === 100 ? " complete" : ""}`}
+                      style={{ width: `${percent}%` }}
+                    />
+                  </div>
                   <div className="course-card-stats">
                     <span>
-                      {course.completed_chapters}/{course.total_chapters} chapters
+                      {course.completed_chapters}/{course.total_chapters} ch
                     </span>
-                    <span>{course.total_sections} sections</span>
+                    <span>·</span>
+                    <span>{course.total_sections} sec</span>
                   </div>
                   <div className="card-actions">
                     <button
                       type="button"
                       className="secondary-button"
-                      onClick={(event) => {
-                        event.stopPropagation();
+                      onClick={(e) => {
+                        e.stopPropagation();
                         navigate(`/courses/${course.id}`);
                       }}
                     >
-                      View course
+                      Open
                     </button>
                     <button
                       type="button"
                       className="danger-button"
-                      onClick={(event) => {
-                        event.stopPropagation();
+                      onClick={(e) => {
+                        e.stopPropagation();
                         void handleDelete(course.id);
                       }}
                     >

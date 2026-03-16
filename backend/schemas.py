@@ -15,6 +15,11 @@ class GenerateChapterRequest(BaseModel):
     api_key: str = ""
 
 
+class RuntimeConfig(BaseModel):
+    provider: str
+    model: str
+
+
 class ExerciseItem(BaseModel):
     title: str
     description: str
@@ -76,5 +81,4 @@ class CourseSummary(BaseModel):
 
     class Config:
         from_attributes = True
-
 

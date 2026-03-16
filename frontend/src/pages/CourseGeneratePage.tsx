@@ -14,7 +14,7 @@ const GENERATION_PHASES = [
 export function CourseGeneratePage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  
+
   const [apiKey, setApiKey] = useState(() => window.localStorage.getItem(API_KEY_STORAGE) ?? "");
   const [topic, setTopic] = useState(searchParams.get("topic") ?? "");
   const [level, setLevel] = useState<CourseLevel>(
@@ -76,25 +76,24 @@ export function CourseGeneratePage() {
 
   return (
     <section className="page-grid">
-      <form className="form-card" onSubmit={handleSubmit}>
-        <label className="field">
-          <span>OpenRouter API key</span>
-          <input
-            type="password"
-            value={apiKey}
-            onChange={(event) => setApiKey(event.target.value)}
-            placeholder="Optional if backend env is already configured"
-            autoComplete="off"
-          />
-        </label>
+      <div className="hero-card">
+        <span className="eyebrow">New course</span>
+        <h1>Generate a course</h1>
+        <p>
+          Enter a topic and the AI will build a structured course outline — sections, chapters, key
+          concepts, and exercises — ready to study immediately.
+        </p>
+      </div>
 
+      <form className="form-card" onSubmit={handleSubmit}>
         <label className="field">
           <span>Topic</span>
           <input
             type="text"
             value={topic}
             onChange={(event) => setTopic(event.target.value)}
-            placeholder="gRPC in Go, Redis internals, distributed tracing..."
+            placeholder="e.g. gRPC in Go, Redis internals, distributed tracing..."
+            autoFocus
           />
         </label>
 
@@ -137,7 +136,19 @@ export function CourseGeneratePage() {
           </label>
         </div>
 
+        <label className="field">
+          <span>OpenRouter API key</span>
+          <input
+            type="password"
+            value={apiKey}
+            onChange={(event) => setApiKey(event.target.value)}
+            placeholder="Optional if the backend is already configured with a key"
+            autoComplete="off"
+          />
+        </label>
+
         {error ? <div className="error-card">{error}</div> : null}
+
         {isSubmitting ? (
           <div className="live-status-card">
             <div className="live-status-head">
@@ -149,9 +160,7 @@ export function CourseGeneratePage() {
               {GENERATION_PHASES.map((phase, index) => (
                 <div
                   key={phase}
-                  className={
-                    index <= phaseIndex ? "phase-item phase-item-active" : "phase-item"
-                  }
+                  className={index <= phaseIndex ? "phase-item phase-item-active" : "phase-item"}
                 >
                   {phase}
                 </div>
