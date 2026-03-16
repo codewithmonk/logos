@@ -118,8 +118,8 @@ export function CourseViewPage() {
     });
   }
 
-  async function ensureChapterGenerated(chapter: ChapterSummary) {
-    if (chapter.generated || generatingChapterId === chapter.id) {
+  async function ensureChapterGenerated(chapter: ChapterSummary, force = false) {
+    if ((!force && chapter.generated) || generatingChapterId === chapter.id) {
       return;
     }
 
@@ -333,6 +333,14 @@ export function CourseViewPage() {
         </section>
 
         <div className="content-actions">
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => void ensureChapterGenerated(active.chapter, true)}
+            disabled={generatingChapterId === active.chapter.id}
+          >
+            {generatingChapterId === active.chapter.id ? "Regenerating..." : "Regenerate chapter"}
+          </button>
           <button
             type="button"
             className="secondary-button"

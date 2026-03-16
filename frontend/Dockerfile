@@ -2,9 +2,10 @@ FROM node:20-alpine AS build
 WORKDIR /app
 
 COPY package.json tsconfig.json tsconfig.app.json tsconfig.node.json vite.config.ts ./
+
+RUN npm install
 COPY index.html ./
 COPY src ./src
-RUN npm install
 RUN npm run build
 
 FROM nginx:alpine

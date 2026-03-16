@@ -374,6 +374,7 @@ button {
   display: grid;
   grid-template-columns: 340px minmax(0, 1fr);
   gap: 1.25rem;
+  min-width: 0;
 }
 
 .sidebar-card {
@@ -382,6 +383,12 @@ button {
   top: 5.6rem;
   border-radius: 28px;
   padding: 1.25rem;
+  min-width: 0;
+}
+
+.content-card {
+  min-width: 0;
+  overflow-x: hidden;
 }
 
 .sidebar-header,
@@ -459,6 +466,7 @@ button {
 .render-markdown {
   color: var(--muted);
   line-height: 1.8;
+  min-width: 0;
 }
 
 .render-markdown h2,
@@ -496,11 +504,14 @@ button {
   padding: 0;
   background: transparent;
   border: none;
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 .render-markdown pre code {
   display: block;
   overflow-x: auto;
+  max-width: 100%;
   padding: 1.25rem;
   background: #1e1e1e; /* hljs dark bg */
   color: #d4d4d4;
@@ -514,11 +525,14 @@ button {
   border-radius: 16px;
   background: #1e1e1e;
   border: 1px solid var(--border);
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
 }
 
 .code-block-wrapper pre {
   margin: 0;
+  max-width: 100%;
 }
 
 .code-block-wrapper pre code {

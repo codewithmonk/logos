@@ -78,6 +78,84 @@ def parse_json_response(raw: str) -> dict:
         raise ValueError(f"JSON decode error: {str(e)}")
 
 
+def infer_code_language(code: str) -> str:
+    trimmed = code.strip()
+    if re.search(r"(^|\n)\s*(package\s+\w+|import\s*\(|func\s+\w+\s*\(|type\s+\w+\s+struct)", trimmed):
+        return "go"
+    if re.search(r"(^|\n)\s*(def\s+\w+\(|from\s+\w+\s+import\s+|import\s+\w+)", trimmed):
+        return "python"
+    if re.search(r"(^|\n)\s*(const|let|function)\s+\w+|=>|console\.log\(", trimmed):
+        return "javascript"
+    if re.search(r"(^|\n)\s*(interface|type|export\s+|import\s+.+from\s+)", trimmed):
+        return "typescript"
+    if re.search(r"^\s*(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER)\b", trimmed, re.IGNORECASE):
+        return "sql"
+    if re.search(r"^\s*[\[{]", trimmed):
+        return "json"
+    return "text"
+
+
+def looks_like_code_line(line: str) -> bool:
+    trimmed = line.strip()
+    if not trimmed:
+        return False
+    if re.match(r"^(#{1,6}\s|[-*]\s|>\s)", trimmed):
+        return False
+    return bool(
+        re.search(r"[{}();]", trimmed)
+        or re.search(r"\b(func|package|import|return|if|else|for|switch|case|const|let|var|type|struct|class)\b", trimmed)
+        or re.search(r"\w+\s*:=\s*", trimmed)
+        or re.search(r"\w+\.\w+\(", trimmed)
+        or re.search(r"//", trimmed)
+    )
+
+
+def normalize_markdown_content(content: str | None) -> str | None:
+    if not content:
+        return content
+
+    def normalize_existing_fence(match: re.Match) -> str:
+        lang = match.group(1) or ""
+        code = match.group(2).strip()
+        next_lang = lang if lang and lang != "text" else infer_code_language(code)
+        return f"```{next_lang}\n{code}\n```"
+
+    normalized = re.sub(r"```(\w+)?\n([\s\S]*?)```", normalize_existing_fence, content)
+
+    lines = normalized.split("\n")
+    output: list[str] = []
+    buffer: list[str] = []
+    in_fence = False
+
+    def flush_buffer() -> None:
+        nonlocal buffer
+        if len(buffer) >= 2 and all(looks_like_code_line(line) or not line.strip() for line in buffer):
+            code = "\n".join(buffer).strip()
+            if code:
+                output.append(f"```{infer_code_language(code)}\n{code}\n```")
+        else:
+            output.extend(buffer)
+        buffer = []
+
+    for line in lines:
+        if line.strip().startswith("```"):
+            flush_buffer()
+            in_fence = not in_fence
+            output.append(line)
+            continue
+        if in_fence:
+            output.append(line)
+            continue
+        if looks_like_code_line(line) or (buffer and (line.startswith("    ") or line.startswith("\t") or not line.strip())):
+            buffer.append(line)
+            continue
+        flush_buffer()
+        output.append(line)
+
+    flush_buffer()
+    return "\n".join(output)
+
+
 def chapter_to_schema(ch: models.Chapter) -> schemas.ChapterSummary:
     return schemas.ChapterSummary(
         id=ch.id,
@@ -324,7 +402,9 @@ Rules:
 - Stay tightly scoped to this chapter only.
 - Keep the chapter aligned with the course level and section context.
 - If hasDiagram is false, set diagram to null.
-- CRITICAL: Any code snippets MUST be properly wrapped in markdown triple backticks (```language ... ```). Do not output loose code.
+- CRITICAL: Any code snippets MUST be properly wrapped in markdown triple backticks with a language label, for example ```go.
+- CRITICAL: Never place code outside a fenced code block. Do not write code-like lines in normal paragraphs.
+- CRITICAL: Start the code fence before the first code token such as `package`, `import`, `func`, or variable declarations.
 - Return pure JSON only."""
 
     raw = await call_openrouter(req.api_key, prompt)
@@ -333,11 +413,11 @@ Rules:
 
     chapter.key_concepts = data.get("keyConcepts", chapter.key_concepts or [])
     chapter.has_diagram = data.get("hasDiagram", chapter.has_diagram)
-    chapter.explanation = content.get("explanation")
+    chapter.explanation = normalize_markdown_content(content.get("explanation"))
     chapter.diagram = content.get("diagram")
-    chapter.real_world_example = content.get("realWorldExample")
+    chapter.real_world_example = normalize_markdown_content(content.get("realWorldExample"))
     chapter.exercises = content.get("exercises", [])
-    chapter.summary = content.get("summary")
+    chapter.summary = normalize_markdown_content(content.get("summary"))
     db.commit()
     db.refresh(chapter)
 
