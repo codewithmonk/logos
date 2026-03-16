@@ -24,11 +24,13 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      - DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@database:5439/${POSTGRES_DB}"
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@database:5432/${POSTGRES_DB}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL}
     ports:
       - "8000:8000"
     depends_on:
-      db:
+      database:
         condition: service_healthy
 
   frontend:
