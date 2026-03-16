@@ -15,21 +15,38 @@ class Course(Base):
     api_key_hint = Column(String(10))  # last 4 chars only
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    chapters = relationship("Chapter", back_populates="course", cascade="all, delete-orphan", order_by="Chapter.number")
+    sections = relationship("Section", back_populates="course", cascade="all, delete-orphan", order_by="Section.number")
 
-
-class Chapter(Base):
-    __tablename__ = "chapters"
+class Section(Base):
+    __tablename__ = "sections"
 
     id = Column(Integer, primary_key=True, index=True)
     course_id = Column(Integer, ForeignKey("courses.id", ondelete="CASCADE"), nullable=False)
     number = Column(Integer, nullable=False)
     title = Column(String(500), nullable=False)
     description = Column(Text)
+
+    course = relationship("Course", back_populates="sections")
+    chapters = relationship("Chapter", back_populates="section", cascade="all, delete-orphan", order_by="Chapter.number")
+
+
+class Chapter(Base):
+    __tablename__ = "chapters"
+
+    id = Column(Integer, primary_key=True, index=True)
+    section_id = Column(Integer, ForeignKey("sections.id", ondelete="CASCADE"), nullable=False)
+    number = Column(Integer, nullable=False)
+    title = Column(String(500), nullable=False)
+    description = Column(Text)
     key_concepts = Column(JSON, default=list)
     has_diagram = Column(Boolean, default=False)
-    is_generated = Column(Boolean, default=False)
     completed = Column(Boolean, default=False)
-    content = Column(JSON, nullable=True)  # cached chapter content from Gemini
+    
+    # Generated content properties
+    explanation = Column(Text, nullable=True)
+    diagram = Column(Text, nullable=True)
+    real_world_example = Column(Text, nullable=True)
+    exercises = Column(JSON, default=list)
+    summary = Column(Text, nullable=True)
 
-    course = relationship("Course", back_populates="chapters")
+    section = relationship("Section", back_populates="chapters")

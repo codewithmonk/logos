@@ -6,6 +6,7 @@ import httpx
 import json
 import re
 import logging
+import os
 
 from database import get_db, engine
 import models
@@ -26,26 +27,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
-# ── Gemini helper ──────────────────────────────────────────────────────────────
+# ── OpenRouter helper ──────────────────────────────────────────────────────────────
 
-async def call_gemini(api_key: str, prompt: str, system: str = "") -> str:
+async def call_openrouter(api_key: str, prompt: str, system: str = "") -> str:
+    env_key = os.getenv("OPENROUTER_API_KEY", "")
+    key_to_use = api_key if api_key else env_key
+    if not key_to_use:
+        raise HTTPException(status_code=400, detail="OpenRouter API key is missing. Please provide it or set it in .env")
+    
+    model = os.getenv("OPENROUTER_MODEL", "openrouter/hunter-alpha")
+    
     body = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 4096},
+        "model": model,
+        "messages": [],
+        "reasoning": {"enabled": True}
     }
     if system:
-        body["systemInstruction"] = {"parts": [{"text": system}]}
+        body["messages"].append({"role": "system", "content": system})
+    body["messages"].append({"role": "user", "content": prompt})
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        res = await client.post(f"{GEMINI_URL}?key={api_key}", json=body)
+    headers = {
+        "Authorization": f"Bearer {key_to_use}",
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=300) as client:
+        res = await client.post(OPENROUTER_URL, headers=headers, json=body)
         if res.status_code != 200:
             err = res.json()
-            raise HTTPException(status_code=400, detail=err.get("error", {}).get("message", "Gemini API error"))
+            error_msg = err.get("error", {}).get("message", "OpenRouter API error")
+            raise HTTPException(status_code=res.status_code, detail=error_msg)
         data = res.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        return data["choices"][0]["message"]["content"]
 
 
 def parse_json_response(raw: str) -> dict:
@@ -53,8 +69,31 @@ def parse_json_response(raw: str) -> dict:
     start = cleaned.find("{")
     end = cleaned.rfind("}")
     if start == -1 or end == -1:
+        logger.error(f"Failed to find JSON in raw response:\n{raw}")
         raise ValueError("No JSON object found in response")
-    return json.loads(cleaned[start:end + 1])
+    try:
+        return json.loads(cleaned[start:end + 1])
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse JSON string:\n{cleaned[start:end+1]}")
+        raise ValueError(f"JSON decode error: {str(e)}")
+
+
+def chapter_to_schema(ch: models.Chapter) -> schemas.ChapterSummary:
+    return schemas.ChapterSummary(
+        id=ch.id,
+        number=ch.number,
+        title=ch.title,
+        description=ch.description,
+        key_concepts=ch.key_concepts,
+        has_diagram=ch.has_diagram,
+        completed=ch.completed,
+        generated=bool(ch.explanation),
+        explanation=ch.explanation,
+        diagram=ch.diagram,
+        real_world_example=ch.real_world_example,
+        exercises=ch.exercises,
+        summary=ch.summary
+    )
 
 
 # ── Course routes ──────────────────────────────────────────────────────────────
@@ -64,16 +103,27 @@ def list_courses(db: Session = Depends(get_db)):
     courses = db.query(models.Course).order_by(models.Course.created_at.desc()).all()
     result = []
     for c in courses:
-        total = db.query(models.Chapter).filter(models.Chapter.course_id == c.id).count()
-        done = db.query(models.Chapter).filter(
-            models.Chapter.course_id == c.id,
-            models.Chapter.completed == True
-        ).count()
+        total_sections = db.query(models.Section).filter(models.Section.course_id == c.id).count()
+        
+        # Count chapters across all sections of this course
+        sections = db.query(models.Section).filter(models.Section.course_id == c.id).all()
+        section_ids = [s.id for s in sections]
+        
+        total = 0
+        done = 0
+        if section_ids:
+            total = db.query(models.Chapter).filter(models.Chapter.section_id.in_(section_ids)).count()
+            done = db.query(models.Chapter).filter(
+                models.Chapter.section_id.in_(section_ids),
+                models.Chapter.completed == True
+            ).count()
+
         result.append(schemas.CourseSummary(
             id=c.id,
             title=c.title,
             topic=c.topic,
             level=c.level,
+            total_sections=total_sections,
             total_chapters=total,
             completed_chapters=done,
             created_at=c.created_at,
@@ -83,30 +133,39 @@ def list_courses(db: Session = Depends(get_db)):
 
 @app.post("/api/courses/generate", response_model=schemas.CourseDetail)
 async def generate_course(req: schemas.GenerateCourseRequest, db: Session = Depends(get_db)):
-    prompt = f"""Create a {req.num_chapters}-chapter course outline for: "{req.topic}" at {req.level} level.
+    prompt = f"""Generate a course outline for: "{req.topic}" at {req.level} level.
+Structure: {req.num_sections} main sections, each containing {req.chapters_per_section} chapters.
 
-Return ONLY valid JSON, no markdown:
+Return ONLY valid JSON, no markdown outside of the JSON string:
 {{
   "courseTitle": "...",
   "courseDescription": "...",
-  "chapters": [
+  "sections": [
     {{
       "id": 1,
       "title": "...",
       "description": "...",
-      "keyConcepts": ["concept1", "concept2", "concept3"],
-      "hasDiagram": true
+      "chapters": [
+        {{
+          "id": 1,
+          "title": "...",
+          "description": "...",
+          "keyConcepts": ["concept1", "concept2", "concept3"],
+          "hasDiagram": true
+        }}
+      ]
     }}
   ]
 }}
 
 Rules:
-- Make titles specific and practical
-- hasDiagram: true for chapters covering architecture, flows, processes, comparisons
-- keyConcepts: 3-6 specific terms per chapter
-- Be technical and substantive for {req.level} level"""
+- Only produce the course outline. Do not generate full chapter lesson content.
+- keyConcepts should be concise and specific.
+- hasDiagram should indicate whether the eventual full chapter would benefit from a Mermaid diagram.
+- Be highly technical and substantive for {req.level} level.
+- Return pure JSON only"""
 
-    raw = await call_gemini(req.api_key, prompt)
+    raw = await call_openrouter(req.api_key, prompt)
     data = parse_json_response(raw)
 
     # Persist course
@@ -115,45 +174,36 @@ Rules:
         description=data["courseDescription"],
         topic=req.topic,
         level=req.level,
-        api_key_hint=req.api_key[-4:],  # store only last 4 chars as hint
+        api_key_hint=req.api_key[-4:] if req.api_key else "env",
     )
     db.add(course)
     db.flush()
 
-    chapters = []
-    for ch in data["chapters"]:
-        chapter = models.Chapter(
+    for sec_data in data["sections"]:
+        section = models.Section(
             course_id=course.id,
-            number=ch["id"],
-            title=ch["title"],
-            description=ch["description"],
-            key_concepts=ch["keyConcepts"],
-            has_diagram=ch.get("hasDiagram", False),
+            number=sec_data["id"],
+            title=sec_data["title"],
+            description=sec_data["description"]
         )
-        db.add(chapter)
-        chapters.append(chapter)
+        db.add(section)
+        db.flush()
+
+        for ch in sec_data["chapters"]:
+            chapter = models.Chapter(
+                section_id=section.id,
+                number=ch["id"],
+                title=ch["title"],
+                description=ch["description"],
+                key_concepts=ch.get("keyConcepts", []),
+                has_diagram=ch.get("hasDiagram", False),
+            )
+            db.add(chapter)
 
     db.commit()
     db.refresh(course)
 
-    return schemas.CourseDetail(
-        id=course.id,
-        title=course.title,
-        description=course.description,
-        topic=course.topic,
-        level=course.level,
-        created_at=course.created_at,
-        chapters=[schemas.ChapterSummary(
-            id=ch.id,
-            number=ch.number,
-            title=ch.title,
-            description=ch.description,
-            key_concepts=ch.key_concepts,
-            has_diagram=ch.has_diagram,
-            is_generated=ch.is_generated,
-            completed=ch.completed,
-        ) for ch in chapters]
-    )
+    return get_course(course.id, db)
 
 
 @app.get("/api/courses/{course_id}", response_model=schemas.CourseDetail)
@@ -161,9 +211,27 @@ def get_course(course_id: int, db: Session = Depends(get_db)):
     course = db.query(models.Course).filter(models.Course.id == course_id).first()
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
-    chapters = db.query(models.Chapter).filter(
-        models.Chapter.course_id == course_id
-    ).order_by(models.Chapter.number).all()
+        
+    sections = db.query(models.Section).filter(
+        models.Section.course_id == course_id
+    ).order_by(models.Section.number).all()
+    
+    section_responses = []
+    for sec in sections:
+        chapters = db.query(models.Chapter).filter(
+            models.Chapter.section_id == sec.id
+        ).order_by(models.Chapter.number).all()
+        
+        chapter_responses = [chapter_to_schema(ch) for ch in chapters]
+        
+        section_responses.append(schemas.SectionSummary(
+            id=sec.id,
+            number=sec.number,
+            title=sec.title,
+            description=sec.description,
+            chapters=chapter_responses
+        ))
+
     return schemas.CourseDetail(
         id=course.id,
         title=course.title,
@@ -171,16 +239,7 @@ def get_course(course_id: int, db: Session = Depends(get_db)):
         topic=course.topic,
         level=course.level,
         created_at=course.created_at,
-        chapters=[schemas.ChapterSummary(
-            id=ch.id,
-            number=ch.number,
-            title=ch.title,
-            description=ch.description,
-            key_concepts=ch.key_concepts,
-            has_diagram=ch.has_diagram,
-            is_generated=ch.is_generated,
-            completed=ch.completed,
-        ) for ch in chapters]
+        sections=section_responses
     )
 
 
@@ -194,58 +253,98 @@ def delete_course(course_id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-# ── Chapter routes ─────────────────────────────────────────────────────────────
-
-@app.post("/api/chapters/{chapter_id}/generate", response_model=schemas.ChapterContent)
-async def generate_chapter(chapter_id: int, req: schemas.GenerateChapterRequest, db: Session = Depends(get_db)):
+@app.post("/api/chapters/{chapter_id}/generate", response_model=schemas.ChapterSummary)
+async def generate_chapter(
+    chapter_id: int,
+    req: schemas.GenerateChapterRequest,
+    db: Session = Depends(get_db),
+):
     chapter = db.query(models.Chapter).filter(models.Chapter.id == chapter_id).first()
     if not chapter:
         raise HTTPException(status_code=404, detail="Chapter not found")
 
-    # Return cached content if already generated
-    if chapter.is_generated and chapter.content:
-        return schemas.ChapterContent(**chapter.content)
+    section = db.query(models.Section).filter(models.Section.id == chapter.section_id).first()
+    if not section:
+        raise HTTPException(status_code=404, detail="Section not found")
 
-    course = db.query(models.Course).filter(models.Course.id == chapter.course_id).first()
+    course = db.query(models.Course).filter(models.Course.id == section.course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
 
-    diagram_rule = (
-        '- "diagram": a valid Mermaid diagram string (flowchart TD, sequenceDiagram, or graph LR). Keep node labels short, no quotes inside labels.'
-        if chapter.has_diagram else
-        '- "diagram": null'
-    )
+    sibling_chapters = db.query(models.Chapter).filter(
+        models.Chapter.section_id == section.id
+    ).order_by(models.Chapter.number).all()
+    sibling_outline = [
+        {
+            "number": item.number,
+            "title": item.title,
+            "description": item.description,
+        }
+        for item in sibling_chapters
+    ]
 
-    prompt = f"""Generate detailed course content:
+    prompt = f"""Generate the FULL lesson content for one chapter in a course.
 
-Topic: {course.topic}
-Level: {course.level}
-Chapter {chapter.number}: "{chapter.title}"
-Description: {chapter.description}
+Course title: "{course.title}"
+Course topic: "{course.topic}"
+Course level: "{course.level}"
+Course description: "{course.description}"
 
-Return ONLY valid JSON:
+Current section:
+- number: {section.number}
+- title: "{section.title}"
+- description: "{section.description}"
+
+Chapter outline:
+- number: {chapter.number}
+- title: "{chapter.title}"
+- description: "{chapter.description}"
+- key concepts: {json.dumps(chapter.key_concepts)}
+- has diagram: {"true" if chapter.has_diagram else "false"}
+
+Sibling chapter outline for context:
+{json.dumps(sibling_outline, indent=2)}
+
+Return ONLY valid JSON, no markdown outside of the JSON string:
 {{
-  "explanation": "3-4 paragraphs with markdown: **bold**, `code`, ### headings, bullet lists, ```language code blocks. Be technical and deep.",
-  "diagram": "...",
-  "realWorldExample": "Concrete scenario with actual code snippets.",
-  "exercises": [
-    {{"title": "...", "description": "..."}},
-    {{"title": "...", "description": "..."}}
-  ],
-  "summary": "2-3 sentence summary."
+  "keyConcepts": ["concept1", "concept2", "concept3"],
+  "hasDiagram": true,
+  "content": {{
+    "explanation": "3-4 paragraphs with markdown: **bold**, `code`, ### headings, bullet lists, ```language code blocks. Be technical and deep.",
+    "diagram": "valid Mermaid diagram string or null",
+    "realWorldExample": "Concrete scenario with actual code snippets.",
+    "exercises": [
+      {{"title": "...", "description": "..."}}
+    ],
+    "summary": "2-3 sentence summary."
+  }}
 }}
 
-{diagram_rule}
-- Be substantive for {course.level} level — not shallow
-- Return pure JSON only"""
+Rules:
+- Stay tightly scoped to this chapter only.
+- Keep the chapter aligned with the course level and section context.
+- If hasDiagram is false, set diagram to null.
+- CRITICAL: Any code snippets MUST be properly wrapped in markdown triple backticks (```language ... ```). Do not output loose code.
+- Return pure JSON only."""
 
-    raw = await call_gemini(req.api_key, prompt)
-    content = parse_json_response(raw)
+    raw = await call_openrouter(req.api_key, prompt)
+    data = parse_json_response(raw)
+    content = data.get("content", {})
 
-    # Cache to DB
-    chapter.content = content
-    chapter.is_generated = True
+    chapter.key_concepts = data.get("keyConcepts", chapter.key_concepts or [])
+    chapter.has_diagram = data.get("hasDiagram", chapter.has_diagram)
+    chapter.explanation = content.get("explanation")
+    chapter.diagram = content.get("diagram")
+    chapter.real_world_example = content.get("realWorldExample")
+    chapter.exercises = content.get("exercises", [])
+    chapter.summary = content.get("summary")
     db.commit()
+    db.refresh(chapter)
 
-    return schemas.ChapterContent(**content)
+    return chapter_to_schema(chapter)
+
+
+
 
 
 @app.patch("/api/chapters/{chapter_id}/complete")

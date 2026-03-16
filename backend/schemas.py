@@ -7,11 +7,17 @@ class GenerateCourseRequest(BaseModel):
     api_key: str
     topic: str
     level: str = "intermediate"
-    num_chapters: int = 8
+    num_sections: int = 12
+    chapters_per_section: int = 8
 
 
 class GenerateChapterRequest(BaseModel):
-    api_key: str
+    api_key: str = ""
+
+
+class ExerciseItem(BaseModel):
+    title: str
+    description: str
 
 
 class ChapterSummary(BaseModel):
@@ -21,8 +27,25 @@ class ChapterSummary(BaseModel):
     description: str
     key_concepts: list[str]
     has_diagram: bool
-    is_generated: bool
     completed: bool
+    generated: bool
+    
+    explanation: Optional[str] = None
+    diagram: Optional[str] = None
+    real_world_example: Optional[str] = None
+    exercises: list[ExerciseItem] = []
+    summary: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class SectionSummary(BaseModel):
+    id: int
+    number: int
+    title: str
+    description: str
+    chapters: list[ChapterSummary]
 
     class Config:
         from_attributes = True
@@ -35,7 +58,7 @@ class CourseDetail(BaseModel):
     topic: str
     level: str
     created_at: datetime
-    chapters: list[ChapterSummary]
+    sections: list[SectionSummary]
 
     class Config:
         from_attributes = True
@@ -46,6 +69,7 @@ class CourseSummary(BaseModel):
     title: str
     topic: str
     level: str
+    total_sections: int
     total_chapters: int
     completed_chapters: int
     created_at: datetime
@@ -54,17 +78,3 @@ class CourseSummary(BaseModel):
         from_attributes = True
 
 
-class ExerciseItem(BaseModel):
-    title: str
-    description: str
-
-
-class ChapterContent(BaseModel):
-    explanation: str
-    diagram: Optional[str] = None
-    realWorldExample: str
-    exercises: list[ExerciseItem]
-    summary: str
-
-    class Config:
-        from_attributes = True
