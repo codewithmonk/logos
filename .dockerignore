@@ -1,0 +1,48 @@
+# Git
+.git
+.gitignore
+
+# Docker
+.dockerignore
+docker-compose.yml
+docker-compose.*.yml
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environmental variables
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.env/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Node / Frontend
+node_modules/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+
+# OS
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+
+# Documentation
+README.md
+docs/
