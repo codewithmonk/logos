@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import pLimit from "p-limit";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import { MermaidDiagram } from "../components/MermaidDiagram";
@@ -33,10 +34,15 @@ export function CourseViewPage() {
   const { mode } = useTheme();
   const [course, setCourse] = useState<CourseDetail | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
-  const [error, setError] = useState("");
+  const [courseLoadError, setCourseLoadError] = useState("");
+  const [chapterErrors, setChapterErrors] = useState<Record<number, string>>({});
   const [isLoading, setIsLoading] = useState(true);
-  const [generatingChapterId, setGeneratingChapterId] = useState<number | null>(null);
+  const [generatingChapterIds, setGeneratingChapterIds] = useState<Set<number>>(new Set());
   const [collapsedSections, setCollapsedSections] = useState<Set<number>>(new Set());
+  const [limitWarning, setLimitWarning] = useState(false);
+
+  // Limit concurrent chapter generations to 10 at a time
+  const generationLimit = useMemo(() => pLimit(10), []);
 
   function toggleSection(sectionId: number) {
     setCollapsedSections((prev) => {
@@ -53,21 +59,21 @@ export function CourseViewPage() {
   useEffect(() => {
     async function loadCourse() {
       if (!courseId) {
-        setError("Missing course id");
+        setCourseLoadError("Missing course id");
         setIsLoading(false);
         return;
       }
 
       try {
         setIsLoading(true);
-        setError("");
+        setCourseLoadError("");
         const nextCourse = await api.getCourse(Number(courseId));
         const flattened = flattenCourse(nextCourse);
         const firstIncomplete = flattened.findIndex((item) => !item.chapter.completed);
         setCourse(nextCourse);
         setActiveIndex(firstIncomplete >= 0 ? firstIncomplete : 0);
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Could not load course");
+        setCourseLoadError(err instanceof Error ? err.message : "Could not load course");
       } finally {
         setIsLoading(false);
       }
@@ -112,19 +118,45 @@ export function CourseViewPage() {
   }
 
   async function ensureChapterGenerated(chapter: ChapterSummary, force = false) {
-    if ((!force && chapter.generated) || generatingChapterId === chapter.id) return;
+    if ((!force && chapter.generated) || generatingChapterIds.has(chapter.id)) return;
 
-    try {
-      setError("");
-      setGeneratingChapterId(chapter.id);
-      const apiKey = window.localStorage.getItem("cf_api_key") ?? "";
-      const nextChapter = await api.generateChapter(chapter.id, apiKey);
-      mergeChapter(nextChapter);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not generate chapter");
-    } finally {
-      setGeneratingChapterId(null);
+    if (generatingChapterIds.size >= 10) {
+      setLimitWarning(true);
+      setTimeout(() => setLimitWarning(false), 4000);
+      return;
     }
+
+    // We enqueue the generation task using p-limit instance
+    await generationLimit(async () => {
+      try {
+        setChapterErrors((prev) => {
+          const next = { ...prev };
+          delete next[chapter.id];
+          return next;
+        });
+
+        setGeneratingChapterIds((prev) => {
+          const next = new Set(prev);
+          next.add(chapter.id);
+          return next;
+        });
+
+        const apiKey = window.localStorage.getItem("cf_api_key") ?? "";
+        const nextChapter = await api.generateChapter(chapter.id, apiKey);
+        mergeChapter(nextChapter);
+      } catch (err) {
+        setChapterErrors((prev) => ({
+          ...prev,
+          [chapter.id]: err instanceof Error ? err.message : "Could not generate chapter",
+        }));
+      } finally {
+        setGeneratingChapterIds((prev) => {
+          const next = new Set(prev);
+          next.delete(chapter.id);
+          return next;
+        });
+      }
+    });
   }
 
   async function handleSelectChapter(index: number) {
@@ -152,15 +184,19 @@ export function CourseViewPage() {
         await handleSelectChapter(activeIndex + 1);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not update chapter");
+      setChapterErrors((prev) => ({
+        ...prev,
+        [active.chapter.id]: err instanceof Error ? err.message : "Could not mark chapter complete",
+      }));
     }
   }
 
   if (isLoading) return <LoadingState label="Loading course..." />;
-  if (error) return <ErrorState message={error} />;
+  if (courseLoadError) return <ErrorState message={courseLoadError} />;
   if (!course || !active) return <ErrorState message="This course does not have any chapters yet." />;
 
-  const isGenerating = generatingChapterId === active.chapter.id;
+  const isGenerating = generatingChapterIds.has(active.chapter.id);
+  const chapterError = chapterErrors[active.chapter.id];
 
   return (
     <section className="course-layout">
@@ -187,6 +223,24 @@ export function CourseViewPage() {
               <div
                 className={`progress-fill${progress === 100 ? " complete" : ""}`}
                 style={{ width: `${progress}%` }}
+              />
+            </div>
+          </div>
+
+          <div className="sidebar-progress" style={{ marginTop: "1.5rem" }}>
+            <div className="sidebar-progress-label">
+              <span>API Queue limits</span>
+              <span style={{ color: generatingChapterIds.size >= 10 ? "var(--danger, #ef4444)" : "inherit", fontWeight: generatingChapterIds.size >= 10 ? "bold" : "normal" }}>
+                {generatingChapterIds.size} / 10 Active
+              </span>
+            </div>
+            <div className="progress-bar">
+              <div
+                className="progress-fill"
+                style={{ 
+                  width: `${clampPercent(generatingChapterIds.size, 10)}%`,
+                  backgroundColor: generatingChapterIds.size >= 10 ? "var(--danger, #ef4444)" : undefined
+                }}
               />
             </div>
           </div>
@@ -255,6 +309,11 @@ export function CourseViewPage() {
 
       {/* ── Content ─────────────────────────────────────────── */}
       <article className="content-card">
+        {limitWarning && (
+          <div className="error-banner" style={{ color: "var(--danger, #ef4444)", backgroundColor: "rgba(239, 68, 68, 0.1)", padding: "12px 16px", borderRadius: "8px", marginBottom: "24px", border: "1px solid rgba(239, 68, 68, 0.3)" }}>
+            <strong>Slow down!</strong> You've reached the maximum limit of 10 concurrent requests. Please wait for active generations to finish taking up slots.
+          </div>
+        )}
         <div className="content-header">
           <span className="eyebrow">
             {active.section.title} &middot; Chapter {activeIndex + 1} of {chapters.length}
@@ -278,6 +337,11 @@ export function CourseViewPage() {
         {/* Explanation */}
         <section className="content-section">
           <h3 className="section-heading">Explanation</h3>
+          {chapterError && (
+            <div className="error-banner" style={{ color: "var(--danger)", padding: "16px 0" }}>
+              <strong>Error:</strong> {chapterError}
+            </div>
+          )}
           {isGenerating ? (
             <LoadingState label="Generating chapter content..." />
           ) : active.chapter.generated ? (
