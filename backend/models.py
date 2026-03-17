@@ -48,5 +48,6 @@ class Chapter(Base):
     real_world_example = Column(Text, nullable=True)
     exercises = Column(JSON, default=list)
     summary = Column(Text, nullable=True)
+    raw_response = Column(Text, nullable=True)  # Raw LLM response for debugging
 
     section = relationship("Section", back_populates="chapters")
