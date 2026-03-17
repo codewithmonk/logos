@@ -964,6 +964,71 @@ button {
   text-align: center;
 }
 
+.diagram-button {
+  display: block;
+  width: 100%;
+  cursor: zoom-in;
+}
+
+.diagram-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.7rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.diagram-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: rgba(10, 10, 12, 0.62);
+  backdrop-filter: blur(8px);
+}
+
+.diagram-modal-shell {
+  width: min(1220px, 100%);
+  max-height: calc(100vh - 3rem);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  border-radius: 20px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.diagram-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.95rem 1.2rem;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.diagram-modal-close {
+  background: var(--panel-strong);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.45rem 0.8rem;
+  border-radius: 999px;
+}
+
+.diagram-modal-body {
+  overflow: auto;
+  padding: 1.25rem;
+  background: var(--panel-strong);
+}
+
 .diagram-fallback {
   border-radius: 12px;
   padding: 1rem;
