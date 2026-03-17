@@ -42,5 +42,21 @@ services:
     depends_on:
       - backend
 
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: logos_prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - backend
+
 volumes:
   postgres_data:
+  prometheus_data:

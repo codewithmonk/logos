@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 from typing import Optional
 import httpx
@@ -9,6 +10,9 @@ import logging
 import os
 import asyncio
 import random
+import time
+
+from prometheus_client import Counter, Gauge, Histogram, CONTENT_TYPE_LATEST, generate_latest
 
 from database import get_db, engine
 import models
@@ -43,6 +47,64 @@ app.add_middleware(
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "openrouter/hunter-alpha"
 
+HTTP_REQUESTS_TOTAL = Counter(
+    "logos_http_requests_total",
+    "Total HTTP requests handled by the Logos API",
+    ["method", "path", "status"],
+)
+HTTP_REQUEST_DURATION_SECONDS = Histogram(
+    "logos_http_request_duration_seconds",
+    "HTTP request duration in seconds",
+    ["method", "path"],
+)
+API_OPERATION_TOTAL = Counter(
+    "logos_api_operation_total",
+    "Application-level operation outcomes",
+    ["operation", "outcome"],
+)
+OPENROUTER_REQUESTS_TOTAL = Counter(
+    "logos_openrouter_requests_total",
+    "Total OpenRouter requests made by the Logos API",
+    ["model", "outcome"],
+)
+OPENROUTER_REQUEST_DURATION_SECONDS = Histogram(
+    "logos_openrouter_request_duration_seconds",
+    "OpenRouter request duration in seconds",
+    ["model"],
+)
+COURSES_GENERATED_TOTAL = Counter(
+    "logos_courses_generated_total",
+    "Total course outlines generated",
+)
+CHAPTERS_GENERATED_TOTAL = Counter(
+    "logos_chapters_generated_total",
+    "Total chapters generated on demand",
+)
+CHAPTER_COMPLETIONS_TOTAL = Counter(
+    "logos_chapter_completions_total",
+    "Total chapter completion events",
+)
+TOTAL_COURSES_GAUGE = Gauge(
+    "logos_total_courses",
+    "Current number of courses stored",
+)
+TOTAL_SECTIONS_GAUGE = Gauge(
+    "logos_total_sections",
+    "Current number of sections stored",
+)
+TOTAL_CHAPTERS_GAUGE = Gauge(
+    "logos_total_chapters",
+    "Current number of chapters stored",
+)
+GENERATED_CHAPTERS_GAUGE = Gauge(
+    "logos_generated_chapters",
+    "Current number of chapters with generated content",
+)
+COMPLETED_CHAPTERS_GAUGE = Gauge(
+    "logos_completed_chapters",
+    "Current number of completed chapters",
+)
+
 # System prompt injected for all chapter content generation requests.
 # Leading, explicit, and repeated — LLMs follow front-loaded instructions.
 CHAPTER_SYSTEM_PROMPT = """\
@@ -76,6 +138,61 @@ The handler receives a `ResponseWriter` and `*Request`.
 """
 
 
+def normalized_metrics_path(path: str) -> str:
+    if re.fullmatch(r"/api/courses/\d+", path):
+        return "/api/courses/{course_id}"
+    if re.fullmatch(r"/api/courses/\d+/raw", path):
+        return "/api/courses/{course_id}/raw"
+    if re.fullmatch(r"/api/chapters/\d+/generate", path):
+        return "/api/chapters/{chapter_id}/generate"
+    if re.fullmatch(r"/api/chapters/\d+/complete", path):
+        return "/api/chapters/{chapter_id}/complete"
+    if re.fullmatch(r"/api/chapters/\d+/raw", path):
+        return "/api/chapters/{chapter_id}/raw"
+    return path
+
+
+def update_content_metrics(db: Session) -> schemas.MetricsSummary:
+    total_courses = db.query(models.Course).count()
+    total_sections = db.query(models.Section).count()
+    total_chapters = db.query(models.Chapter).count()
+    generated_chapters = db.query(models.Chapter).filter(models.Chapter.explanation.isnot(None)).count()
+    completed_chapters = db.query(models.Chapter).filter(models.Chapter.completed == True).count()
+
+    TOTAL_COURSES_GAUGE.set(total_courses)
+    TOTAL_SECTIONS_GAUGE.set(total_sections)
+    TOTAL_CHAPTERS_GAUGE.set(total_chapters)
+    GENERATED_CHAPTERS_GAUGE.set(generated_chapters)
+    COMPLETED_CHAPTERS_GAUGE.set(completed_chapters)
+
+    return schemas.MetricsSummary(
+        total_courses=total_courses,
+        total_sections=total_sections,
+        total_chapters=total_chapters,
+        generated_chapters=generated_chapters,
+        completed_chapters=completed_chapters,
+    )
+
+
+@app.middleware("http")
+async def record_http_metrics(request: Request, call_next):
+    path = normalized_metrics_path(request.url.path)
+    method = request.method
+    start_time = time.perf_counter()
+
+    try:
+        response = await call_next(request)
+        status = str(response.status_code)
+        return response
+    except Exception:
+        status = "500"
+        raise
+    finally:
+        duration = time.perf_counter() - start_time
+        HTTP_REQUESTS_TOTAL.labels(method=method, path=path, status=status).inc()
+        HTTP_REQUEST_DURATION_SECONDS.labels(method=method, path=path).observe(duration)
+
+
 # ── OpenRouter helper ──────────────────────────────────────────────────────────────
 
 async def call_openrouter(api_key: str, prompt: str, system: str = "") -> str:
@@ -101,6 +218,7 @@ async def call_openrouter(api_key: str, prompt: str, system: str = "") -> str:
     }
 
     timeout = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
+    started_at = time.perf_counter()
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         last_exception: Exception | None = None
@@ -113,8 +231,13 @@ async def call_openrouter(api_key: str, prompt: str, system: str = "") -> str:
                 if res.status_code != 200:
                     err = res.json()
                     error_msg = err.get("error", {}).get("message", "OpenRouter API error")
+                    OPENROUTER_REQUESTS_TOTAL.labels(model=model, outcome="http_error").inc()
                     raise HTTPException(status_code=res.status_code, detail=error_msg)
                 data = res.json()
+                OPENROUTER_REQUEST_DURATION_SECONDS.labels(model=model).observe(
+                    time.perf_counter() - started_at
+                )
+                OPENROUTER_REQUESTS_TOTAL.labels(model=model, outcome="success").inc()
                 return data["choices"][0]["message"]["content"]
             except HTTPException:
                 raise
@@ -132,11 +255,13 @@ async def call_openrouter(api_key: str, prompt: str, system: str = "") -> str:
                     continue
             except httpx.HTTPError as exc:
                 logger.exception("OpenRouter transport error")
+                OPENROUTER_REQUESTS_TOTAL.labels(model=model, outcome="transport_error").inc()
                 raise HTTPException(
                     status_code=502,
                     detail=f"OpenRouter transport error: {exc}",
                 ) from exc
 
+        OPENROUTER_REQUESTS_TOTAL.labels(model=model, outcome="incomplete_response").inc()
         raise HTTPException(
             status_code=502,
             detail=(
@@ -152,11 +277,15 @@ def parse_json_response(raw: str) -> dict:
     end = cleaned.rfind("}")
     if start == -1 or end == -1:
         logger.error(f"Failed to find JSON in raw response:\n{raw}")
+        API_OPERATION_TOTAL.labels(operation="parse_json_response", outcome="error").inc()
         raise ValueError("No JSON object found in response")
     try:
-        return json.loads(cleaned[start:end + 1])
+        parsed = json.loads(cleaned[start:end + 1])
+        API_OPERATION_TOTAL.labels(operation="parse_json_response", outcome="success").inc()
+        return parsed
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse JSON string:\n{cleaned[start:end+1]}")
+        API_OPERATION_TOTAL.labels(operation="parse_json_response", outcome="error").inc()
         raise ValueError(f"JSON decode error: {str(e)}")
 
 
@@ -321,6 +450,11 @@ def get_runtime_config():
         model=os.getenv("OPENROUTER_MODEL", DEFAULT_MODEL),
     )
 
+
+@app.get("/api/metrics/summary", response_model=schemas.MetricsSummary)
+def get_metrics_summary(db: Session = Depends(get_db)):
+    return update_content_metrics(db)
+
 @app.get("/api/courses", response_model=list[schemas.CourseSummary])
 def list_courses(db: Session = Depends(get_db)):
     courses = db.query(models.Course).order_by(models.Course.created_at.desc()).all()
@@ -356,7 +490,8 @@ def list_courses(db: Session = Depends(get_db)):
 
 @app.post("/api/courses/generate", response_model=schemas.CourseDetail)
 async def generate_course(req: schemas.GenerateCourseRequest, db: Session = Depends(get_db)):
-    prompt = f"""Generate a course outline for: "{req.topic}" at {req.level} level.
+    try:
+        prompt = f"""Generate a course outline for: "{req.topic}" at {req.level} level.
 Structure: {req.num_sections} main sections, each containing {req.chapters_per_section} chapters.
 
 Return ONLY valid JSON, no markdown outside of the JSON string:
@@ -388,45 +523,50 @@ Rules:
 - Be highly technical and substantive for {req.level} level.
 - Return pure JSON only"""
 
-    raw = await call_openrouter(req.api_key, prompt)
-    data = parse_json_response(raw)
+        raw = await call_openrouter(req.api_key, prompt)
+        data = parse_json_response(raw)
 
-    # Persist course
-    course = models.Course(
-        title=data["courseTitle"],
-        description=data["courseDescription"],
-        topic=req.topic,
-        level=req.level,
-        api_key_hint=req.api_key[-4:] if req.api_key else "env",
-    )
-    db.add(course)
-    db.flush()
-
-    for sec_data in data["sections"]:
-        section = models.Section(
-            course_id=course.id,
-            number=sec_data["id"],
-            title=sec_data["title"],
-            description=sec_data["description"]
+        course = models.Course(
+            title=data["courseTitle"],
+            description=data["courseDescription"],
+            topic=req.topic,
+            level=req.level,
+            api_key_hint=req.api_key[-4:] if req.api_key else "env",
         )
-        db.add(section)
+        db.add(course)
         db.flush()
 
-        for ch in sec_data["chapters"]:
-            chapter = models.Chapter(
-                section_id=section.id,
-                number=ch["id"],
-                title=ch["title"],
-                description=ch["description"],
-                key_concepts=ch.get("keyConcepts", []),
-                has_diagram=ch.get("hasDiagram", False),
+        for sec_data in data["sections"]:
+            section = models.Section(
+                course_id=course.id,
+                number=sec_data["id"],
+                title=sec_data["title"],
+                description=sec_data["description"]
             )
-            db.add(chapter)
+            db.add(section)
+            db.flush()
 
-    db.commit()
-    db.refresh(course)
+            for ch in sec_data["chapters"]:
+                chapter = models.Chapter(
+                    section_id=section.id,
+                    number=ch["id"],
+                    title=ch["title"],
+                    description=ch["description"],
+                    key_concepts=ch.get("keyConcepts", []),
+                    has_diagram=ch.get("hasDiagram", False),
+                )
+                db.add(chapter)
 
-    return get_course(course.id, db)
+        db.commit()
+        db.refresh(course)
+        COURSES_GENERATED_TOTAL.inc()
+        API_OPERATION_TOTAL.labels(operation="generate_course", outcome="success").inc()
+        update_content_metrics(db)
+        return get_course(course.id, db)
+    except Exception:
+        API_OPERATION_TOTAL.labels(operation="generate_course", outcome="error").inc()
+        db.rollback()
+        raise
 
 
 @app.get("/api/courses/{course_id}", response_model=schemas.CourseDetail)
@@ -473,6 +613,7 @@ def delete_course(course_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Course not found")
     db.delete(course)
     db.commit()
+    update_content_metrics(db)
     return {"ok": True}
 
 
@@ -482,31 +623,32 @@ async def generate_chapter(
     req: schemas.GenerateChapterRequest,
     db: Session = Depends(get_db),
 ):
-    chapter = db.query(models.Chapter).filter(models.Chapter.id == chapter_id).first()
-    if not chapter:
-        raise HTTPException(status_code=404, detail="Chapter not found")
+    try:
+        chapter = db.query(models.Chapter).filter(models.Chapter.id == chapter_id).first()
+        if not chapter:
+            raise HTTPException(status_code=404, detail="Chapter not found")
 
-    section = db.query(models.Section).filter(models.Section.id == chapter.section_id).first()
-    if not section:
-        raise HTTPException(status_code=404, detail="Section not found")
+        section = db.query(models.Section).filter(models.Section.id == chapter.section_id).first()
+        if not section:
+            raise HTTPException(status_code=404, detail="Section not found")
 
-    course = db.query(models.Course).filter(models.Course.id == section.course_id).first()
-    if not course:
-        raise HTTPException(status_code=404, detail="Course not found")
+        course = db.query(models.Course).filter(models.Course.id == section.course_id).first()
+        if not course:
+            raise HTTPException(status_code=404, detail="Course not found")
 
-    sibling_chapters = db.query(models.Chapter).filter(
-        models.Chapter.section_id == section.id
-    ).order_by(models.Chapter.number).all()
-    sibling_outline = [
-        {
-            "number": item.number,
-            "title": item.title,
-            "description": item.description,
-        }
-        for item in sibling_chapters
-    ]
+        sibling_chapters = db.query(models.Chapter).filter(
+            models.Chapter.section_id == section.id
+        ).order_by(models.Chapter.number).all()
+        sibling_outline = [
+            {
+                "number": item.number,
+                "title": item.title,
+                "description": item.description,
+            }
+            for item in sibling_chapters
+        ]
 
-    prompt = f"""Generate FULL lesson content for this chapter. Return ONLY valid JSON — no text outside the JSON object.
+        prompt = f"""Generate FULL lesson content for this chapter. Return ONLY valid JSON — no text outside the JSON object.
 
 Course: "{course.title}" ({course.level} level)
 Section {section.number}: "{section.title}"
@@ -539,22 +681,29 @@ Constraints:
 - explanation and realWorldExample MUST use ```language fenced blocks for every code snippet — no bare code in prose.
 - Return pure JSON only."""
 
-    raw = await call_openrouter(req.api_key, prompt, system=CHAPTER_SYSTEM_PROMPT)
-    chapter.raw_response = raw  # Store raw LLM response for debugging
-    data = parse_json_response(raw)
-    content = data.get("content", {})
+        raw = await call_openrouter(req.api_key, prompt, system=CHAPTER_SYSTEM_PROMPT)
+        chapter.raw_response = raw
+        data = parse_json_response(raw)
+        content = data.get("content", {})
 
-    chapter.key_concepts = data.get("keyConcepts", chapter.key_concepts or [])
-    chapter.has_diagram = data.get("hasDiagram", chapter.has_diagram)
-    chapter.explanation = normalize_markdown_content(content.get("explanation"))
-    chapter.diagram = content.get("diagram")
-    chapter.real_world_example = normalize_markdown_content(content.get("realWorldExample"))
-    chapter.exercises = content.get("exercises", [])
-    chapter.summary = normalize_markdown_content(content.get("summary"))
-    db.commit()
-    db.refresh(chapter)
+        chapter.key_concepts = data.get("keyConcepts", chapter.key_concepts or [])
+        chapter.has_diagram = data.get("hasDiagram", chapter.has_diagram)
+        chapter.explanation = normalize_markdown_content(content.get("explanation"))
+        chapter.diagram = content.get("diagram")
+        chapter.real_world_example = normalize_markdown_content(content.get("realWorldExample"))
+        chapter.exercises = content.get("exercises", [])
+        chapter.summary = normalize_markdown_content(content.get("summary"))
+        db.commit()
+        db.refresh(chapter)
+        CHAPTERS_GENERATED_TOTAL.inc()
+        API_OPERATION_TOTAL.labels(operation="generate_chapter", outcome="success").inc()
+        update_content_metrics(db)
 
-    return chapter_to_schema(chapter)
+        return chapter_to_schema(chapter)
+    except Exception:
+        API_OPERATION_TOTAL.labels(operation="generate_chapter", outcome="error").inc()
+        db.rollback()
+        raise
 
 
 
@@ -562,12 +711,20 @@ Constraints:
 
 @app.patch("/api/chapters/{chapter_id}/complete")
 def mark_chapter_complete(chapter_id: int, db: Session = Depends(get_db)):
-    chapter = db.query(models.Chapter).filter(models.Chapter.id == chapter_id).first()
-    if not chapter:
-        raise HTTPException(status_code=404, detail="Chapter not found")
-    chapter.completed = True
-    db.commit()
-    return {"ok": True}
+    try:
+        chapter = db.query(models.Chapter).filter(models.Chapter.id == chapter_id).first()
+        if not chapter:
+            raise HTTPException(status_code=404, detail="Chapter not found")
+        chapter.completed = True
+        db.commit()
+        CHAPTER_COMPLETIONS_TOTAL.inc()
+        API_OPERATION_TOTAL.labels(operation="mark_chapter_complete", outcome="success").inc()
+        update_content_metrics(db)
+        return {"ok": True}
+    except Exception:
+        API_OPERATION_TOTAL.labels(operation="mark_chapter_complete", outcome="error").inc()
+        db.rollback()
+        raise
 
 
 @app.get("/api/chapters/{chapter_id}/raw")
@@ -586,3 +743,9 @@ def get_chapter_raw_response(chapter_id: int, db: Session = Depends(get_db)):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+def prometheus_metrics(db: Session = Depends(get_db)):
+    update_content_metrics(db)
+    return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)

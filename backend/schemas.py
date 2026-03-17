@@ -20,6 +20,14 @@ class RuntimeConfig(BaseModel):
     model: str
 
 
+class MetricsSummary(BaseModel):
+    total_courses: int
+    total_sections: int
+    total_chapters: int
+    generated_chapters: int
+    completed_chapters: int
+
+
 class ExerciseItem(BaseModel):
     title: str
     description: str
@@ -81,4 +89,3 @@ class CourseSummary(BaseModel):
 
     class Config:
         from_attributes = True
-
