@@ -7,6 +7,8 @@ import json
 import re
 import logging
 import os
+import asyncio
+import random
 
 from database import get_db, engine
 import models
@@ -98,14 +100,50 @@ async def call_openrouter(api_key: str, prompt: str, system: str = "") -> str:
         "Content-Type": "application/json",
     }
 
-    async with httpx.AsyncClient(timeout=300) as client:
-        res = await client.post(OPENROUTER_URL, headers=headers, json=body)
-        if res.status_code != 200:
-            err = res.json()
-            error_msg = err.get("error", {}).get("message", "OpenRouter API error")
-            raise HTTPException(status_code=res.status_code, detail=error_msg)
-        data = res.json()
-        return data["choices"][0]["message"]["content"]
+    timeout = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        last_exception: Exception | None = None
+
+        base_delay_seconds = 1.0
+
+        for attempt in range(3):
+            try:
+                res = await client.post(OPENROUTER_URL, headers=headers, json=body)
+                if res.status_code != 200:
+                    err = res.json()
+                    error_msg = err.get("error", {}).get("message", "OpenRouter API error")
+                    raise HTTPException(status_code=res.status_code, detail=error_msg)
+                data = res.json()
+                return data["choices"][0]["message"]["content"]
+            except HTTPException:
+                raise
+            except (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ReadError) as exc:
+                last_exception = exc
+                logger.warning(
+                    "OpenRouter request failed on attempt %s/3: %s",
+                    attempt + 1,
+                    exc,
+                )
+                if attempt < 2:
+                    backoff_seconds = base_delay_seconds * (2 ** attempt)
+                    jitter_seconds = random.uniform(0, 0.35 * backoff_seconds)
+                    await asyncio.sleep(backoff_seconds + jitter_seconds)
+                    continue
+            except httpx.HTTPError as exc:
+                logger.exception("OpenRouter transport error")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"OpenRouter transport error: {exc}",
+                ) from exc
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "OpenRouter connection dropped before the response completed. "
+                "Please retry the chapter generation."
+            ),
+        ) from last_exception
 
 
 def parse_json_response(raw: str) -> dict:

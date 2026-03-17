@@ -1015,6 +1015,12 @@ button {
   color: var(--muted);
 }
 
+.diagram-modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
 .diagram-modal-close {
   background: var(--panel-strong);
   border: 1px solid var(--border);
@@ -1027,6 +1033,37 @@ button {
   overflow: auto;
   padding: 1.25rem;
   background: var(--panel-strong);
+  display: grid;
+  gap: 0.75rem;
+}
+
+.diagram-modal-hint,
+.diagram-zoom-label {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.diagram-modal-canvas {
+  overflow: auto;
+  min-height: 65vh;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  cursor: grab;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.diagram-modal-canvas.dragging {
+  cursor: grabbing;
+}
+
+.diagram-modal-content {
+  transform-origin: center center;
+  will-change: transform;
 }
 
 .diagram-fallback {
