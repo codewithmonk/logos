@@ -7,6 +7,8 @@ import json
 import re
 import logging
 import os
+import asyncio
+import random
 
 from database import get_db, engine
 import models
@@ -17,6 +19,17 @@ logger = logging.getLogger(__name__)
 
 # Create tables on startup
 models.Base.metadata.create_all(bind=engine)
+
+# Migrate: add columns that may not exist in older databases
+def _run_migrations():
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        conn.execute(text(
+            "ALTER TABLE chapters ADD COLUMN IF NOT EXISTS raw_response TEXT"
+        ))
+        conn.commit()
+
+_run_migrations()
 
 app = FastAPI(title="Logos API", version="1.0.0")
 
@@ -87,14 +100,50 @@ async def call_openrouter(api_key: str, prompt: str, system: str = "") -> str:
         "Content-Type": "application/json",
     }
 
-    async with httpx.AsyncClient(timeout=300) as client:
-        res = await client.post(OPENROUTER_URL, headers=headers, json=body)
-        if res.status_code != 200:
-            err = res.json()
-            error_msg = err.get("error", {}).get("message", "OpenRouter API error")
-            raise HTTPException(status_code=res.status_code, detail=error_msg)
-        data = res.json()
-        return data["choices"][0]["message"]["content"]
+    timeout = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        last_exception: Exception | None = None
+
+        base_delay_seconds = 1.0
+
+        for attempt in range(3):
+            try:
+                res = await client.post(OPENROUTER_URL, headers=headers, json=body)
+                if res.status_code != 200:
+                    err = res.json()
+                    error_msg = err.get("error", {}).get("message", "OpenRouter API error")
+                    raise HTTPException(status_code=res.status_code, detail=error_msg)
+                data = res.json()
+                return data["choices"][0]["message"]["content"]
+            except HTTPException:
+                raise
+            except (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ReadError) as exc:
+                last_exception = exc
+                logger.warning(
+                    "OpenRouter request failed on attempt %s/3: %s",
+                    attempt + 1,
+                    exc,
+                )
+                if attempt < 2:
+                    backoff_seconds = base_delay_seconds * (2 ** attempt)
+                    jitter_seconds = random.uniform(0, 0.35 * backoff_seconds)
+                    await asyncio.sleep(backoff_seconds + jitter_seconds)
+                    continue
+            except httpx.HTTPError as exc:
+                logger.exception("OpenRouter transport error")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"OpenRouter transport error: {exc}",
+                ) from exc
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "OpenRouter connection dropped before the response completed. "
+                "Please retry the chapter generation."
+            ),
+        ) from last_exception
 
 
 def parse_json_response(raw: str) -> dict:
@@ -491,6 +540,7 @@ Constraints:
 - Return pure JSON only."""
 
     raw = await call_openrouter(req.api_key, prompt, system=CHAPTER_SYSTEM_PROMPT)
+    chapter.raw_response = raw  # Store raw LLM response for debugging
     data = parse_json_response(raw)
     content = data.get("content", {})
 
@@ -518,6 +568,19 @@ def mark_chapter_complete(chapter_id: int, db: Session = Depends(get_db)):
     chapter.completed = True
     db.commit()
     return {"ok": True}
+
+
+@app.get("/api/chapters/{chapter_id}/raw")
+def get_chapter_raw_response(chapter_id: int, db: Session = Depends(get_db)):
+    """Debug endpoint: returns the raw LLM response stored for a chapter."""
+    chapter = db.query(models.Chapter).filter(models.Chapter.id == chapter_id).first()
+    if not chapter:
+        raise HTTPException(status_code=404, detail="Chapter not found")
+    return {
+        "chapter_id": chapter_id,
+        "title": chapter.title,
+        "raw_response": chapter.raw_response,
+    }
 
 
 @app.get("/health")
